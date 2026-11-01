@@ -5,7 +5,6 @@ import sys
 import json
 from typing import List, Dict, Any
 import statistics
-import math
 
 # Constants
 LOG_FILE = "pa_permission_anomaly_detector.log"
@@ -102,8 +101,9 @@ def analyze_permissions(data: List[Dict[str, Any]], sensitivity: float) -> List[
     """
     anomalies = []
 
-    # Collect statistics on permission assignments. For simplicity, we'll focus
-    # on the number of unique permissions assigned to users.
+    # Collect statistics on permission assignments. Each user's total is
+    # the sum of the lengths of that user's permission strings across
+    # all of that user's items.
     user_permission_counts = {}
     for item in data:
         user = item.get("user")
@@ -111,9 +111,9 @@ def analyze_permissions(data: List[Dict[str, Any]], sensitivity: float) -> List[
         if user and permissions:
             if user not in user_permission_counts:
                 user_permission_counts[user] = 0
-            user_permission_counts[user] += len(permissions) # count unique permissions
+            user_permission_counts[user] += len(permissions)
 
-    # Calculate the mean and standard deviation of permission counts
+    # Calculate the mean and standard deviation of the per user totals.
     if not user_permission_counts:
         logging.warning("No permission data available for analysis.")
         return anomalies #Return empty list
@@ -128,41 +128,41 @@ def analyze_permissions(data: List[Dict[str, Any]], sensitivity: float) -> List[
     stdev = statistics.stdev(counts) if len(counts) > 1 else 0 # Prevent error when only one sample
 
 
-    # Identify users with anomalous permission counts.
-    for item in data:
-        user = item.get("user")
-        permissions = item.get("permissions")
-
-        if user and permissions:
-            permission_count = len(permissions)
-            if stdev > 0 and (abs(permission_count - mean) > sensitivity * stdev): # Avoid division by zero
-                anomalies.append({
-                    "user": user,
-                    "file": item.get("file"),
-                    "permissions": permissions,
-                    "deviation": permission_count - mean,
-                    "message": f"Anomalous permissions for user {user}: {permissions} (deviation from mean: {permission_count - mean:.2f})",
-                })
-                logging.warning(f"Detected anomaly: User {user} - {permissions}")
+    # Identify users whose total count is an outlier against the totals
+    # themselves. One anomaly is emitted per outlying user.
+    for user, total_count in user_permission_counts.items():
+        if stdev > 0 and (abs(total_count - mean) > sensitivity * stdev):
+            anomalies.append({
+                "user": user,
+                "total_permission_count": total_count,
+                "deviation": total_count - mean,
+                "message": f"Anomalous permission total for user {user}: {total_count} (deviation from mean: {total_count - mean:.2f})",
+            })
+            logging.warning(f"Detected anomaly: User {user} - total {total_count}")
 
     return anomalies
 
 
-def save_report(report: List[Dict[str, Any]], report_file: str) -> None:
+def save_report(report: List[Dict[str, Any]], report_file: str) -> bool:
     """
     Saves the anomaly report to a JSON file.
 
     Args:
         report (List[Dict[str, Any]]): A list of anomaly dictionaries.
         report_file (str): The path to the output JSON file.
+
+    Returns:
+        bool: True when the report was written, False otherwise.
     """
     try:
         with open(report_file, "w") as f:
             json.dump(report, f, indent=4)
         logging.info(f"Anomaly report saved to: {report_file}")
+        return True
     except Exception as e:
         logging.error(f"Error saving report: {e}")
         print(f"Error saving report: {e}", file=sys.stderr)
+        return False
 
 
 def main():
@@ -180,9 +180,21 @@ def main():
         if args.sensitivity <= 0:
             raise ValueError("Sensitivity must be a positive number.")
 
+        if os.path.realpath(args.data_file) == os.path.realpath(args.report_file):
+            print("Error: Report file must not be the same as the data file.", file=sys.stderr)
+            sys.exit(1)
+
         data = load_permission_data(args.data_file)
+
+        usable_users = {item.get("user") for item in data if item.get("user") and item.get("permissions")}
+        if not data or len(usable_users) < 2:
+            print("Insufficient data: need at least two users with permission data to detect anomalies.", file=sys.stderr)
+            sys.exit(1)
+
         anomalies = analyze_permissions(data, args.sensitivity)
-        save_report(anomalies, args.report_file)
+        if not save_report(anomalies, args.report_file):
+            print(f"Report not saved: {args.report_file}", file=sys.stderr)
+            sys.exit(1)
 
         if anomalies:
             print(f"Detected {len(anomalies)} anomalies.  See report file: {args.report_file}")
