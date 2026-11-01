@@ -104,6 +104,11 @@ def analyze_permissions(data: List[Dict[str, Any]], sensitivity: float) -> List[
     # Collect statistics on permission assignments. Each user's total is
     # the sum of the lengths of that user's permission strings across
     # all of that user's items.
+    # Two things that total cannot see: the role and file keys in the
+    # data are never read, so an admin and an intern sit in the same
+    # population and the admin's normal total reads as deviation; and
+    # repeated identical grants keep adding length, so duplication
+    # alone can push a user over the line.
     user_permission_counts = {}
     for item in data:
         user = item.get("user")
@@ -130,6 +135,10 @@ def analyze_permissions(data: List[Dict[str, Any]], sensitivity: float) -> List[
 
     # Identify users whose total count is an outlier against the totals
     # themselves. One anomaly is emitted per outlying user.
+    # The test is two sided because of the abs: a user far below the
+    # mean is flagged with the same wording as one far above it, even
+    # though holding unusually few permissions is rarely the risk this
+    # report gets read for.
     for user, total_count in user_permission_counts.items():
         if stdev > 0 and (abs(total_count - mean) > sensitivity * stdev):
             anomalies.append({
